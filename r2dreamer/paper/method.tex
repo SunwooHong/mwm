@@ -1,0 +1,221 @@
+% Method section for Malleable World Models (MWM)
+% \input{method} from main.tex (requires amsmath, amssymb; optional booktabs)
+
+\section{Method}
+\label{sec:method}
+
+We build on a pretrained model-based agent with a recurrent state-space model (RSSM)~\cite{hafner2020dream}.
+At deployment, all pretrained parameters are \emph{frozen} for inference; test-time learning modifies either (i)~a separate fast plastic state~$P_t$, (ii)~the actor on a slow schedule, or (iii)~a subset of world-model weights on an even slower schedule.
+Figure~\ref{fig:overview} (omitted here) summarizes the three pathways.
+This section defines notation, the fast plastic layer, slow actor adaptation, consolidation with flush, and the gain-shift evaluation protocol.
+
+%----------------------------------------------------------------------
+\subsection{Preliminaries: frozen pretrained agent}
+\label{sec:prelim}
+
+Let $\theta$ denote the pretrained parameters of encoder $f_\theta$, RSSM $(h_\theta, g_\theta)$, decoder, and policy $\pi_\theta$, trained offline on task $\mathcal{T}_0$.
+At test time we maintain frozen copies $(f, h, g, \pi) \leftarrow (f_\theta, h_\theta, g_\theta, \pi_\theta)$ used for action selection and latent rollout unless explicitly updated by a slow pathway (Section~\ref{sec:slow-actor}--\ref{sec:consolidation}).
+
+Given observation $o_t$, the encoder produces embedding $e_t = f(o_t)$.
+The RSSM maintains stochastic state $s_t$ and deterministic state $d_t$.
+An observation step yields posterior logit $\ell^{\mathrm{post}}_t$ and updated $(s_t, d_t)$; the one-step prior over the \emph{next} stochastic state is
+\begin{equation}
+  \ell^{\mathrm{prior}}_t = g(d_t) \in \mathbb{R}^{K},
+\end{equation}
+where $K$ is the flattened stochastic logit dimension (for categorical latents, $K = N_{\mathrm{categ}} \times N_{\mathrm{classes}}$).
+The policy samples $a_t \sim \pi(\cdot \mid \mathrm{feat}(s_t, d_t))$.
+
+We evaluate under a controlled distribution shift that leaves observations and rewards in the same space but changes the environment's response to actions (Section~\ref{sec:shift}).
+
+%----------------------------------------------------------------------
+\subsection{Environment shift: actuator gain}
+\label{sec:shift}
+
+Physical simulator parameters (mass, friction, etc.) are held fixed.
+Shift is induced by an \emph{action-gain} wrapper that scales the torque sent to the environment:
+\begin{equation}
+  \tilde{a}_t = \gamma_t \, a_t, \qquad \gamma_t \in (0, 1],
+\end{equation}
+where $a_t$ is the agent output and $\tilde{a}_t$ is executed.
+This mimics weakened actuators or calibration drift without retraining the observation model.
+Our default schedule uses three phases (Section~\ref{sec:protocol}): $\gamma=1.0$ (in-distribution), $\gamma=0.7$ (shift / adaptation), $\gamma=1.0$ (recovery).
+
+%----------------------------------------------------------------------
+\subsection{Fast pathway: plastic prior-logit residual}
+\label{sec:fast-plastic}
+
+\paragraph{State and readout.}
+MWM augments the frozen prior with a test-time matrix $P_t \in \mathbb{R}^{K \times d}$ (one matrix per parallel environment), with no additional pretrained weights.
+The plastic input is
+\begin{equation}
+  x_t = \big[\mathrm{flat}(s_t);\; d_{t-1};\; \hat{a}_{t-1}\big] \in \mathbb{R}^{d},
+  \qquad
+  d = K + |d| + |a|,
+\end{equation}
+where $\hat{a}_{t-1}$ is the previous action with each component divided by $\max(1, |a_{t-1,i}|)$ for numerical stability.
+The corrected prior logit is
+\begin{equation}
+  \ell^{\mathrm{prior,pl}}_t = \ell^{\mathrm{prior}}_t + P_t x_t.
+  \label{eq:plastic-read}
+\end{equation}
+During online interaction, Equation~\eqref{eq:plastic-read} affects the latent observation path only through the prior used to form prediction error; the policy still reads $(s_t, d_t)$ from the standard RSSM observation core with frozen weights.
+
+\paragraph{Signed error.}
+After the observation core produces $\ell^{\mathrm{post}}_t$, we define the clipped signed error
+\begin{equation}
+  e_t = \mathrm{clip}\!\left(\ell^{\mathrm{post}}_t - \ell^{\mathrm{prior,pl}}_t,\; \rho\right) \in \mathbb{R}^{K},
+  \label{eq:signed-error}
+\end{equation}
+with per-vector norm clipped to $\rho$ (default $\rho=0.5$).
+We track $\mathrm{MSE}_t = \|e_t\|_2^2 / K$ as a \emph{prior prediction error} diagnostic for shift detection.
+
+\paragraph{Hebbian write (no backprop through $\theta$).}
+$P_t$ is updated at \emph{every} environment step inside \texttt{torch.no\_grad()}:
+\begin{align}
+  \Delta P_t &= \eta \, g_t \, e_t x_t^\top - \lambda^{\mathrm{eff}}_t P_t,
+  \label{eq:plastic-write}\\
+  P_{t+1} &= \mathrm{Proj}_{\|\cdot\|_F \le \mu}\!\left(P_t + \Delta P_t\right),
+  \label{eq:plastic-proj}
+\end{align}
+where $\eta$ is a plastic learning rate, $\mu$ is a Frobenius-norm cap (default $\mu=2$), and $g_t \in [0,1]$ is a surprise gate (below).
+Equation~\eqref{eq:plastic-write} is a rank-one Hebbian term minus weight decay; it is local, causal, and does not backpropagate through the frozen backbone.
+
+\paragraph{Effective decay and flush.}
+The base decay is $\lambda_0$ (default $10^{-3}$).
+When consolidation flush is enabled (Section~\ref{sec:consolidation}),
+\begin{equation}
+  \lambda^{\mathrm{eff}}_t = \lambda_0 + k_{\mathrm{flush}}\,\sigma\!\left(-\frac{\|e_t\|_2}{\tau}\right) + b_t,
+  \label{eq:lambda-eff}
+\end{equation}
+where $\sigma$ is the logistic function, $\tau$ scales error magnitude (default $0.15$), $k_{\mathrm{flush}}$ is a config constant (default $0.5$), and $b_t \ge 0$ is a \emph{coupled flush boost} increased when slow world-model loss improves.
+Large $\lambda^{\mathrm{eff}}_t$ accelerates draining of $P_t$ once the slow pathway has absorbed shift statistics.
+
+\paragraph{Surprise gating.}
+For gate mode \texttt{selective}, $g_t$ combines (i)~a normalized surprise statistic $z_t$ from an EMA of $\|e_t\|^2$ and (ii)~a direction-persistence score based on consecutive error alignment.
+Modes \texttt{surprise\_only} and \texttt{always\_on} ablate parts of this logic; our main experiments use \texttt{always\_on} ($g_t \equiv 1$), so fast plasticity is continuously active and shift is reflected primarily in $e_t$ and $\|P_t\|_F$.
+
+\paragraph{Episode reset.}
+On \texttt{is\_first}, $P_t$ and gate statistics are zeroed for the corresponding batch index, but slow-updated actor / $\theta$ weights persist across episodes.
+
+\paragraph{Capacity.}
+For proprioceptive \texttt{walker-walk} with default RSSM ($32$ categorical factors $\times$ $16$ classes, $|d|=2048$, $|a|=6$), $P_t$ has shape $512 \times 2566$ (${\sim}1.3\times10^6$ floats, ${\sim}6\%$ of frozen parameter count).
+
+%----------------------------------------------------------------------
+\subsection{Online inference loop}
+\label{sec:inference}
+
+At each step with plastic inference enabled:
+\begin{enumerate}[leftmargin=*, itemsep=1pt]
+  \item Encode $e_t = f(o_t)$; run frozen RSSM observation core $\rightarrow (\ell^{\mathrm{post}}_t, s_t, d_t)$.
+  \item Form $x_t$; read $P_t x_t$; compute $\ell^{\mathrm{prior,pl}}_t$ (Eq.~\eqref{eq:plastic-read}).
+  \item Compute $e_t$ (Eq.~\eqref{eq:signed-error}); update $P_t$ (Eqs.~\eqref{eq:plastic-write}--\eqref{eq:plastic-proj}).
+  \item Sample $a_t \sim \pi_\theta(\cdot \mid \mathrm{feat}(s_t, d_t))$ using the \emph{frozen} actor unless slow actor adaptation has modified $\pi_\theta$.
+\end{enumerate}
+Thus fast plasticity is a \emph{world-model correction} applied before the policy; it is not a direct motor reflex.
+The agent's ``immediate'' response to shift is a change in latent beliefs, not an instantaneous change in policy weights.
+
+%----------------------------------------------------------------------
+\subsection{Slow pathway I: actor adaptation}
+\label{sec:slow-actor}
+
+Fast plasticity can realign one-step priors but does not directly optimize long-horizon return.
+On phase $\mathcal{B}$ (shift), we collect transitions in a replay buffer $\mathcal{D}$ and periodically fine-tune only the actor via Dreamer-style imagination~\cite{hafner2020dream}.
+
+\paragraph{Schedule.}
+Every $\Delta_{\mathrm{adapt}}$ environment steps (default $\Delta_{\mathrm{adapt}}=50$), sample a sequence batch from $\mathcal{D}$ and perform $E$ gradient steps (default $E=4$) on the policy loss, with learning rate scaled by $\alpha_{\mathrm{actor}}$ (default $1.0$).
+
+\paragraph{Imagination dynamics.}
+Latent rollouts for the policy gradient use horizon $H$ (RSSM \texttt{imag\_horizon}).
+Let \texttt{use\_plastic\_wm} control whether $P_t x$ is added during \emph{imagination}:
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Frozen-WM imagine} (\texttt{use\_plastic\_wm=false}, our default): rollouts follow $g$ without plastic read; reward/value/cont heads remain frozen copies.
+  \item \textbf{Plastic-WM imagine} (\texttt{true}): a snapshot of $P_t$ is cloned and applied in each imagined step via Eq.~\eqref{eq:plastic-read}.
+\end{itemize}
+Online interaction always writes $P_t$ when plastic is enabled; the flag only affects actor gradients.
+Empirically, frozen-WM imagine with online plastic in the replay distribution yields more stable control improvements than plastic-WM imagine.
+
+\paragraph{Loss.}
+Standard $\lambda$-return actor loss on imagined trajectories with frozen reward, value, and continuation heads; gradients are masked to actor parameters only (adaptive gradient clipping, AGC).
+
+\paragraph{Online vs.\ offline plastic for actor learning.}
+Condition~B enables online $P_t$ writes during $\mathcal{B}$; Condition~C (ablation) disables plastic inference but keeps actor adaptation, isolating whether live prior correction improves the data distribution for slow policy learning.
+
+%----------------------------------------------------------------------
+\subsection{Slow pathway II: world-model consolidation and flush}
+\label{sec:consolidation}
+
+When shifts persist, storing all compensatory structure in $P_t$ is bounded by $\mu$ and disappears on buffer reset.
+The \emph{consolidation} pathway slowly fine-tunes world-model weights $\theta_{\mathrm{wm}} \subset \theta$ (encoder, RSSM, decoder / projector) on $\mathcal{D}$ while optionally increasing plastic decay to flush $P_t$ into $\theta_{\mathrm{wm}}$.
+
+\paragraph{Slow WM update.}
+Every $\Delta_{\mathrm{slow}}$ steps (default $100$), sample from $\mathcal{D}$ and minimize the pretraining world-model objective restricted to $\theta_{\mathrm{wm}}$:
+dynamics KL, representation KL, and (for R2-Dreamer) Barlow Twins representation loss or (for Dreamer) reconstruction.
+Learning rate is $\alpha_{\mathrm{wm}}$ times the pretraining base LR (default $\alpha_{\mathrm{wm}}=0.02$); only WM parameters receive gradients (AGC on WM parameters).
+
+\paragraph{Frozen sync.}
+After each slow update, live weights are copied into frozen inference modules:
+$f, h, g \leftarrow f_\theta, h_\theta, g_\theta$.
+The actor and reward heads are \emph{not} updated in this pathway unless separately adapted (Section~\ref{sec:slow-actor}).
+
+\paragraph{Flush modes.}
+\texttt{set\_consolidation\_mode} controls error-dependent decay (Eq.~\eqref{eq:lambda-eff}):
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+  \item \texttt{off}: $k_{\mathrm{flush}}=0$, $b_t=0$.
+  \item \texttt{coupled}: $k_{\mathrm{flush}}$ active; $b_t$ increases by $0.05$ when dyn loss improves vs.\ its EMA (cap $b_{\max}=0.5$), else decays by $0.98$.
+  \item \texttt{error\_only}: $k_{\mathrm{flush}}$ active but $b_t \equiv 0$ (flush without slow $\theta$, a negative control).
+\end{itemize}
+
+\paragraph{Consolidation conditions (summary).}
+\begin{table}[t]
+  \centering
+  \caption{Test-time conditions for consolidation experiments.}
+  \label{tab:conditions}
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Condition & Online $P_t$ & Actor adapt & Slow $\theta_{\mathrm{wm}}$ & Flush mode \\
+    \midrule
+    A (baseline)     & \checkmark & \checkmark & --            & off \\
+    B (slow WM only) & \checkmark & \checkmark & \checkmark    & off \\
+    C (consolidate)  & \checkmark & \checkmark & \checkmark    & coupled \\
+    D (trap)         & \checkmark & --         & --            & error\_only \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+%----------------------------------------------------------------------
+\subsection{Evaluation protocol}
+\label{sec:protocol}
+
+All test-time experiments share a three-phase rollout unless noted:
+\begin{equation*}
+  \mathcal{A}_1\ (\gamma{=}1.0,\ T_1{=}200)
+  \;\rightarrow\;
+  \mathcal{B}\ (\gamma{=}0.7,\ T_2{=}1000)
+  \;\rightarrow\;
+  \mathcal{A}_2\ (\gamma{=}1.0,\ T_3{=}300).
+\end{equation*}
+$\mathcal{A}_1$ establishes pre-shift performance; $\mathcal{B}$ is the adaptation window (actor / slow WM updates occur only here by default); $\mathcal{A}_2$ tests recovery when gain returns to nominal.
+
+\paragraph{Metrics.}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Return}: mean per-step reward in each phase.
+  \item \textbf{Prior MSE}: $\mathrm{MSE}_t$ from Eq.~\eqref{eq:signed-error}, averaged over steps (WM alignment).
+  \item \textbf{Trace norm}: $\|P_t\|_F$, capped at $\mu$ (fast-store magnitude).
+  \item \textbf{Recovery time}: smallest $t \in \mathcal{B}$ such that the rolling mean return exceeds $0.9 \times$ the $\mathcal{A}_1$ baseline (reported per seed).
+  \item \textbf{Slow dynamics loss}: RSSM KL during $\theta_{\mathrm{wm}}$ updates (consolidation diagnostics).
+\end{itemize}
+
+\paragraph{Implementation.}
+Built on R2-Dreamer with test-time modules \texttt{LogitPlasticResidual}, \texttt{plastic\_actor\_adapt.py}, and \texttt{plastic\_consolidation\_eval.py}.
+Pretrained checkpoint: proprioceptive \texttt{walker-walk}, frozen at eval.
+Plastic defaults: $\eta=0.05$, $\lambda_0=10^{-3}$, $\mu=2$, \texttt{gate\_mode=always\_on}.
+Actor-adapt default (\texttt{cfg0}): $\Delta_{\mathrm{adapt}}=50$, $E=4$, $\alpha_{\mathrm{actor}}=1$, frozen-WM imagine.
+
+%----------------------------------------------------------------------
+\subsection{Design rationale}
+\label{sec:rationale}
+
+Equation~\eqref{eq:plastic-write} implements a \emph{fast, imprecise} store: it reacts on the first post-shift errors with $O(Kd)$ state and no autograd.
+Actor and WM gradient updates are \emph{slow, selective} stores: they require batches, imagination, and careful learning-rate / AGC tuning but can improve long-horizon control and, in principle, absorb persistent structure into $\theta_{\mathrm{wm}}$.
+Coupled flush (Eq.~\eqref{eq:lambda-eff}) expresses the hypothesis that fast compensation should retire once slow parameters explain the shifted dynamics---a computational analogue of complementary learning systems~\cite{mcclelland1995complementary}.
+Which parts of this stack are necessary for detectable, fast, and lasting adaptation is an empirical question addressed in Section~\ref{sec:experiments}.

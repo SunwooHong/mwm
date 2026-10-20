@@ -1,0 +1,30 @@
+% Introduction for Malleable World Models (MWM)
+% \input{introduction}
+
+\section{Introduction}
+\label{sec:introduction}
+
+World models enable model-based agents to plan and act by predicting latent dynamics from experience~\cite{hafner2023mastering,hafner2020dream}.
+Once trained, however, they are typically deployed with \emph{frozen} parameters.
+In open-ended settings---wear on actuators, payload changes, or simulator-to-real gaps---the transition kernel internalized during pretraining ceases to match the environment the agent inhabits.
+Prediction error rises, imagined rollouts become misleading, and control performance degrades.
+\emph{Test-time adaptation} (TTA) seeks to recover competence after such shifts without returning to expensive offline training.
+
+The dominant TTA recipe is gradient-based learning at deployment: collect post-shift trajectories, backpropagate a surrogate loss, and update network weights~\cite{nagabandi2018learning,zintgraf2021fast}.
+This \emph{slow} pathway is expressive but incurs costs that matter in interactive control---batched updates, autograd through long horizons, and tuning to avoid catastrophic forgetting.
+When the shift is sudden, the agent may act suboptimally for many steps before the first weight update.
+
+Biological systems often separate a fast, local error-driven store from slower structural learning~\cite{mcclelland1995complementary}.
+The fast store is not globally optimal; it provides coarse correction so behavior is not blind during transients.
+We transpose this idea to world models: adaptation is not only a motor reflex, but a change in \emph{what the agent believes will happen next}.
+
+We propose \textbf{Malleable World Models (MWM)}: frozen pretrained agents augmented with a \textbf{fast plastic prior residual} $P_t$, updated every step by a Hebbian rule without backprop through pretraining weights, plus optional \textbf{slow} actor and world-model updates from replay.
+We evaluate on proprioceptive \texttt{walker-walk} under actuator gain shift ($1.0 \rightarrow 0.7 \rightarrow 1.0$).
+Section~\ref{sec:method} details the method; Section~\ref{sec:experiments} reports detection, adaptation latency, and consolidation behavior.
+
+\paragraph{Contributions.}
+\begin{enumerate}[leftmargin=*, itemsep=2pt]
+  \item A backpropagation-free plastic prior on RSSM logits with norm-capped state $P_t$.
+  \item A tri-timescale test-time stack: fast $P_t$, slow actor fine-tuning, and optional WM consolidation with coupled flush.
+  \item Empirical characterization on gain shift: rapid trace growth and prior-error changes; control gains when fast plastic scaffolds slow actor learning; pilot evidence for $P_t$ drainage under consolidation.
+\end{enumerate}

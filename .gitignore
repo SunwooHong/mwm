@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+*.pyc
+logdir/
+logs/
+checkpoints/
+*.pt

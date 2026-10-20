@@ -1,0 +1,222 @@
+% Experiments section for Malleable World Models (MWM)
+% \input{experiments} from main.tex (requires booktabs, multirow)
+
+\section{Experiments}
+\label{sec:experiments}
+
+We evaluate MWM on proprioceptive DeepMind Control \texttt{walker-walk} with a single offline checkpoint (R2-Dreamer, ${\sim}510$K environment steps pretraining) held fixed across all test-time runs.
+Unless stated otherwise, plastic uses $\eta=0.05$, $\lambda_0=10^{-3}$, $\mu=2$, and \texttt{gate\_mode=always\_on}; the evaluation protocol follows Section~\ref{sec:protocol} ($\mathcal{A}_1/\mathcal{B}/\mathcal{A}_2$ with $\gamma \in \{1.0, 0.7, 1.0\}$).
+We report mean $\pm$ std over seeds where applicable and paired per-seed comparisons when two conditions share the same random seed and shift realization.
+
+Our empirical program addresses six questions:
+\textbf{(Q1)} Does the agent detect gain shift in world-model error?
+\textbf{(Q2)} Does fast plasticity improve latent alignment under shift?
+\textbf{(Q3)} Does fast plasticity alone improve control?
+\textbf{(Q4)} Does online $P_t$ help slow actor adaptation?
+\textbf{(Q5)} What actor-adapt schedule and imagination mode work best?
+\textbf{(Q6)} Does consolidation drain $P_t$ and improve slow-store learning?
+
+%----------------------------------------------------------------------
+\subsection{Setup and baselines}
+\label{sec:exp-setup}
+
+\paragraph{Checkpoint and shift.}
+All experiments load the same pretrained weights and freeze them for inference (Section~\ref{sec:prelim}).
+Shift is actuator gain $\gamma=0.7$ during $\mathcal{B}$ only; MuJoCo dynamics are unchanged.
+
+\paragraph{Baselines.}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Frozen}: no $P_t$, no actor or WM updates ($\pi_\theta$ and $g$ fixed).
+  \item \textbf{Plastic-only}: online $P_t$ (Section~\ref{sec:fast-plastic}), frozen actor.
+  \item \textbf{Plastic + actor (cfg0)}: online $P_t$ plus slow actor fine-tuning ($\Delta_{\mathrm{adapt}}{=}50$, $E{=}4$, $\alpha_{\mathrm{actor}}{=}1$, frozen-WM imagine).
+  \item \textbf{Actor w/o online plastic (C)}: actor adapt identical to cfg0 but $P_t$ inference disabled during $\mathcal{B}$.
+  \item \textbf{Consolidation A--D}: Table~\ref{tab:conditions} with slow $\theta_{\mathrm{wm}}$ and flush ablations.
+\end{itemize}
+
+\paragraph{Seeds and compute.}
+Main act and actor-adapt sweeps use $10$ random seeds ($0,\ldots,9$).
+WM-imagination and consolidation pilots use $3$ seeds ($0,2,5$) due to cost; we mark these as pilots and do not over-interpret small-$n$ significance.
+
+%----------------------------------------------------------------------
+\subsection{Shift detection and fast-store dynamics (Q1--Q2)}
+\label{sec:exp-detection}
+
+\paragraph{World-model error rises at shift.}
+Across plastic runs, prior prediction error $\mathrm{MSE}_t$ (Eq.~\eqref{eq:signed-error}) increases from $\mathcal{A}_1$ to $\mathcal{B}$ and the fast trace norm grows from near zero to the cap $\mu=2$ within tens of steps after $\gamma$ drops.
+This pattern is consistent across seeds and visible in per-step TensorBoard logs for consolidation runs.
+Figure~\ref{fig:trace-curve} (supplementary) plots $\|P_t\|_F$ for Condition~C versus A/B/D.
+
+\paragraph{Plastic vs.\ frozen prior MSE (10 seeds, plastic-only).}
+Table~\ref{tab:plastic-act} compares Phase~$\mathcal{B}$ return and terminal prior MSE (mean of last $20$ steps).
+Fast plasticity \emph{lowers} prior MSE relative to frozen in $6/10$ seeds; aggregate prior-MSE advantage is seed-skewed (large improvements on seeds $0,5,6$; degradations on $1,2,3,5$).
+
+\begin{table}[t]
+  \centering
+  \caption{Plastic-only vs.\ frozen inference ($n{=}10$ seeds, Phase~$\mathcal{B}$). $\Delta r$ is plastic minus frozen mean return; $\Delta_{\mathrm{MSE}}$ is frozen minus plastic prior MSE (last 20), so positive favors plastic.}
+  \label{tab:plastic-act}
+  \begin{tabular}{@{}lcc@{}}
+    \toprule
+    Metric & Value \\
+    \midrule
+    Mean $\Delta r$ (plastic $-$ frozen) & $-0.009 \pm 0.21$ \\
+    Seeds with $\Delta r > 0$ & $4/10$ \\
+    Seeds with $\Delta_{\mathrm{MSE}} > 0$ & $6/10$ \\
+    Mean $\mathcal{B}/\mathcal{A}_1$ return ratio (plastic) & $0.84$ \\
+    Mean $\mathcal{B}/\mathcal{A}_1$ return ratio (frozen) & $0.78$ \\
+  \end{tabular}
+\end{table}
+
+\paragraph{Interpretation (Q1--Q2).}
+\textbf{Detection} is supported: shift induces sustained prediction error and saturates $P_t$.
+\textbf{WM alignment} under fast plasticity is \emph{partially} supported---more seeds improve than worsen, but effect size varies and mean prior-MSE gap is not uniformly positive.
+Plasticity also \emph{attenuates reward drop} during $\mathcal{B}$ on average (higher $\mathcal{B}/\mathcal{A}_1$ ratio than frozen), even when it does not win pairwise return on every seed.
+
+\paragraph{Gate ablation (prior MSE only).}
+A $10$-seed sweep over gate modes (\texttt{always\_on}, \texttt{surprise\_only}, \texttt{selective}) shows \texttt{surprise\_only} ($\eta=0.1$) achieves the highest prior-MSE win rate ($8/10$) against frozen, while \texttt{always\_on}---used in main runs---wins $7/10$.
+We retain \texttt{always\_on} for downstream actor experiments to maximize continuous fast-store activity; selective gating may improve WM metrics but is not re-tuned jointly with actor adapt here.
+
+%----------------------------------------------------------------------
+\subsection{Fast plasticity alone does not reliably improve control (Q3)}
+\label{sec:exp-plastic-only}
+
+Plastic-only inference does \emph{not} establish a robust control benefit: mean Phase~$\mathcal{B}$ return is statistically indistinguishable from frozen at $n{=}10$ (Table~\ref{tab:plastic-act}).
+Best-case seeds are substantial (e.g., seed~$0$: $\Delta r {=} +0.35$), but negative seeds (e.g., seed~$1$: $\Delta r {=} -0.28$) offset the average.
+
+\paragraph{Recovery phase $\mathcal{A}_2$.}
+When gain returns to $1.0$, both plastic and frozen recover to near-pre-shift return ($\mathcal{A}_2/\mathcal{A}_1 \approx 1.06$ frozen, $1.14$ plastic), indicating that $\mathcal{B}$-phase adaptation leaves carry-over into $\mathcal{A}_2$ without catastrophic drift in this protocol.
+
+\paragraph{Latency.}
+Rolling-window recovery time to $90\%$ of $\mathcal{A}_1$ return during $\mathcal{B}$ is \emph{seed-dependent} and not consistently faster for plastic-only (e.g., seed~$0$: plastic step $74$ vs.\ frozen $41$).
+We therefore do \emph{not} claim a universal speed advantage of Hebbian plasticity on reward recovery without slow actor learning.
+
+%----------------------------------------------------------------------
+\subsection{Online plasticity scaffolds slow actor adaptation (Q4)}
+\label{sec:exp-bc}
+
+We next test whether live $P_t$ during $\mathcal{B}$ improves the \emph{slow} pathway: cfg0 actor adaptation with vs.\ without online plastic (Conditions B vs.\ C in the actor-adapt ablation, $n{=}10$).
+
+\begin{table}[t]
+  \centering
+  \caption{Online $P_t$ during actor adapt (Phase~$\mathcal{B}$, $n{=}10$). B: plastic on; C: plastic off.}
+  \label{tab:bc}
+  \begin{tabular}{@{}lcc@{}}
+    \toprule
+    & B (online $P_t$) & C (no $P_t$) \\
+    \midrule
+    Mean return & $1.386$ & $1.318$ \\
+    Mean $\Delta r$ (B $-$ C) & \multicolumn{2}{c}{$+0.068 \pm 0.10$} \\
+    Seeds with $\Delta r > 0$ & \multicolumn{2}{c}{$7/10$} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+This is the clearest \emph{control} benefit attributable to the fast pathway in our stack: $P_t$ does not need to directly maximize return if it shapes the replay distribution and latent beliefs on which actor gradients are computed.
+Per-seed prior-MSE gaps between B and C are heterogeneous; online plastic is not a strict DOM improvement on WM error in every seed, but it wins on return in $70\%$ of paired runs.
+
+%----------------------------------------------------------------------
+\subsection{Actor schedule and imagination ablations (Q5)}
+\label{sec:exp-actor-sweep}
+
+\paragraph{Imagination dynamics ($n{=}3$ pilot).}
+Using cfg0 actor updates, we compare plastic-WM vs.\ frozen-WM imagination (Section~\ref{sec:slow-actor}).
+Plastic-WM imagine \emph{hurts} Phase~$\mathcal{B}$ return in all three seeds (mean $\Delta r = -0.13$; plastic WM never wins).
+The recommended stack keeps imagination on the frozen prior while maintaining online $P_t$ during environment interaction and replay encoding.
+
+\paragraph{Adapt schedule sweep ($n{=}10$ for top configs).}
+Table~\ref{tab:cfg-sweep} summarizes Phase~$\mathcal{B}$ return for cfg0 (winner), a conservative schedule (cfg1), and no actor adapt.
+A $3$-seed pilot of aggressive diversity (cfg2) and micro-updates (cfg3) underperforms cfg0 and is excluded from full-scale runs.
+
+\begin{table}[t]
+  \centering
+  \caption{Actor-adapt configurations (Phase~$\mathcal{B}$ mean return, $n{=}10$ unless noted).}
+  \label{tab:cfg-sweep}
+  \begin{tabular}{@{}lcccc@{}}
+    \toprule
+    Config & $(\Delta_{\mathrm{adapt}}, E, \alpha_{\mathrm{actor}})$ & Mean $r_{\mathcal{B}}$ & Max $r_{\mathcal{B}}$ & $\Delta$ vs.\ plastic-only \\
+    \midrule
+    Plastic-only act & -- & $1.406$ & -- & -- \\
+    B\_no\_adapt & $(50,4,1)$ w/o actor grad & $1.434$ & $1.594$ & $+0.027$ \\
+  \textbf{cfg0\_default} & $(50,4,1)$ & $\mathbf{1.456 \pm 0.14}$ & $\mathbf{1.668}$ & $\mathbf{+0.050}$ \\
+    cfg1\_conservative & $(100,2,0.2)$ & $1.404 \pm 0.11$ & $1.529$ & $-0.003$ \\
+    cfg2\_diversity ($n{=}3$) & $(200,4,0.5)$ & $1.441$ & $1.501$ & $-0.035$ \\
+    cfg3\_micro ($n{=}3$) & $(25,1,0.1)$ & $1.416$ & $1.506$ & $-0.060$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Takeaway (Q5).}
+Control gains come from \textbf{frozen-WM imagine + online $P_t$ + cfg0 actor cadence}.
+cfg0 beats plastic-only act in $6/10$ seeds (mean $+0.05$) and beats no-adapt in $4/10$ (mean $+0.02$); variance across seeds remains high (std ${\approx} 0.14$).
+
+%----------------------------------------------------------------------
+\subsection{Consolidation pilot: flush without reward transfer (Q6)}
+\label{sec:exp-consolidation}
+
+We run Conditions A--D (Table~\ref{tab:conditions}) with slow $\theta_{\mathrm{wm}}$ every $100$ steps, $\alpha_{\mathrm{wm}}{=}0.02$, and cfg0 actor adapt ($n{=}3$ seeds).
+
+\begin{table}[t]
+  \centering
+  \caption{Consolidation pilot ($n{=}3$, Phase~$\mathcal{B}$).}
+  \label{tab:consolidation}
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    Cond. & Mean return & $\|P_t\|_F$ (last 20) & Prior MSE (last 20) \\
+    \midrule
+    A baseline      & $1.357 \pm 0.22$ & $2.00$ & $5.91$ \\
+    B slow $\theta$ only & $\mathbf{1.409 \pm 0.16}$ & $2.00$ & $5.03$ \\
+    C consolidate   & $1.359 \pm 0.05$ & $\mathbf{0.51}$ & $6.06$ \\
+    D flush trap    & $1.408 \pm 0.13$ & $2.00$ & $4.71$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Mechanism.}
+Condition~C alone collapses $\|P_t\|_F$ from cap $2.0$ to $0.33$--$0.75$ by end of $\mathcal{B}$ in all three seeds, while A/B/D remain saturated.
+Coupled flush boost $b_t$ rises only in C; $\lambda^{\mathrm{eff}}$ increases in tandem (TensorBoard).
+This confirms the \emph{fast-store drainage} mechanism (Eqs.~\eqref{eq:lambda-eff}--\eqref{eq:plastic-proj}).
+
+\paragraph{What is not yet shown.}
+\begin{itemize}[leftmargin=*, itemsep=1pt]
+  \item \textbf{Reward:} C does not beat A ($1.359$ vs.\ $1.357$); B (slow $\theta$ without flush) achieves the highest pilot return.
+  \item \textbf{Stable slow loss:} dynamics KL during $\theta_{\mathrm{wm}}$ updates oscillates across seeds; monotonic ``$\theta$ learns, then $P_t$ retires'' is not clean.
+  \item \textbf{Trap:} D (flush without slow $\theta$) does not drain $P_t$ and does not consistently harm return---the negative control is partial.
+  \item \textbf{Scale:} $n{=}3$; $10$-seed consolidation with retuned $(\alpha_{\mathrm{wm}}, \Delta_{\mathrm{slow}}, b_t$ ramp$)$ is future work.
+\end{itemize}
+
+%----------------------------------------------------------------------
+\subsection{Summary of findings}
+\label{sec:exp-summary}
+
+Table~\ref{tab:summary-rq} maps research questions to outcomes.
+MWM is best understood as a \emph{multi-timescale} system: fast $P_t$ provides immediate WM reactivity and improves slow actor learning when present online; slow actor updates deliver the primary reliable control gains; consolidation drains $P_t$ as designed but has not yet translated into improved return at pilot scale.
+
+\begin{table}[t]
+  \centering
+  \caption{Research questions and experimental verdicts (walker gain shift).}
+  \label{tab:summary-rq}
+  \small
+  \begin{tabular}{@{}p{0.52\linewidth}p{0.40\linewidth}@{}}
+    \toprule
+    Question & Verdict \\
+    \midrule
+    Q1: Detect shift? & \textbf{Yes} (prior MSE $\uparrow$, $\|P_t\|$ saturates) \\
+    Q2: Fast WM alignment? & \textbf{Partial} ($6/10$ seeds, variable magnitude) \\
+    Q3: Plastic-only control? & \textbf{No} (mean $\Delta r \approx 0$, $4/10$ win) \\
+    Q4: Scaffold actor adapt? & \textbf{Yes} ($7/10$, mean $+0.068$) \\
+    Q5: Best slow stack? & \textbf{frozen imagine + cfg0} ($r_{\mathcal{B}}{=}1.46$) \\
+    Q6: Consolidation / flush? & \textbf{Mechanism yes}, \textbf{reward no} (pilot $n{=}3$) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Limitations.}
+Results are confined to one proprioceptive task and one shift family (actuator gain).
+We do not evaluate visual observations, physical parameter shifts, or lifelong deployment beyond the $1500$-step protocol.
+Recovery-time claims are not robust for plastic-only.
+Consolidation hyperparameters used in the pilot ($\Delta_{\mathrm{slow}}{=}100$, $\alpha_{\mathrm{wm}}{=}0.02$) were not re-optimized after observing premature flush and unstable slow loss.
+Finally, reward and value heads remain frozen during slow WM updates; mismatch between adapted dynamics and frozen reward modeling may cap consolidation benefits.
+
+\paragraph{Reproducibility.}
+Code paths: \texttt{plastic\_eval.py}, \texttt{plastic\_actor\_adapt.py}, \texttt{plastic\_consolidation\_eval.py}.
+Aggregates: \texttt{plastic\_act\_seed\_sweep/}, \texttt{plastic\_actor\_adapt\_bc/}, \texttt{plastic\_actor\_adapt\_ratio\_full/}, \texttt{plastic\_consolidation/}.
+Visualization: \texttt{plastic\_visualize.py} (reward overlays, adaptation times, rollout videos).

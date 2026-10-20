@@ -1,0 +1,108 @@
+% Related Work for Malleable World Models (MWM)
+% Typical placement: after \input{introduction}, before \input{method}
+
+\section{Related Work}
+\label{sec:related}
+
+MWM sits at the intersection of model-based reinforcement learning, test-time adaptation, and dual-timescale memory.
+We review each line of work and clarify what our fast plastic prior adds.
+
+%----------------------------------------------------------------------
+\subsection{World models and model-based RL}
+\label{sec:related-wm}
+
+Learned dynamics models enable sample-efficient control by imagining trajectories in latent space~\cite{hafner2019learning,hafner2020dream,ha2018world}.
+Dreamer-style agents couple a recurrent state-space model (RSSM) with an actor--critic trained on imagined rollouts~\cite{hafner2020dream,hafner2023mastering}.
+R2-Dreamer and related redundancy-reduced variants further streamline representation learning while retaining latent imagination~\cite{hafner2023mastering}.
+Planners that search in latent space~\cite{hafner2019learning,okada2021dreaming} depend critically on transition accuracy; when the environment drifts, imagined rewards and values become biased even if the policy architecture is unchanged.
+
+Most world-model agents, once trained, treat the dynamics module as \emph{fixed} at deployment.
+MWM starts from the same pretrained backbone but asks: \emph{which parts of the model should remain frozen, which should adapt slowly with gradients, and which should adapt instantly without backprop?}
+Our answer is to keep the bulk of $\theta$ fixed, add a separate fast state $P_t$ on prior logits, and optionally fine-tune a small slow subset of $\theta_{\mathrm{wm}}$ under consolidation.
+
+%----------------------------------------------------------------------
+\subsection{Test-time adaptation and online fine-tuning}
+\label{sec:related-tta}
+
+Classical meta-reinforcement learning learns initializations or update rules that can adapt quickly to new tasks from few gradient steps~\cite{finn2017model,duan2016rl}.
+At deployment, adaptation still relies on backpropagation through policy or model parameters, often requiring careful inner-loop learning rates and task distributions matched at meta-train time.
+
+\emph{Test-time training} and \emph{test-time adaptation} in supervised settings adjust batch-normalization statistics or encoder weights from unlabeled test batches~\cite{sun2020test,wang2021tent}.
+Analogues in RL collect post-shift trajectories and continue policy or model training online~\cite{nagabandi2018learning,zintgraf2021fast,chua2018deep}.
+RL$^2$ encodes adaptation in recurrent hidden state via sequence training~\cite{duan2016rl}, blurring the line between memory and gradient-based change but requiring meta-training across episodic variations.
+
+These approaches share a \textbf{slow, global} adaptation mechanism: weight updates propagate through the network, are scheduled in batches, and risk catastrophic forgetting of pretraining~\cite{kirkpatrick2017overcoming}.
+MWM is complementary: we add a \textbf{fast, local} store ($P_t$) that updates every step from prediction error without autograd through $\theta$, then use standard slow actor fine-tuning on replay for control.
+Our experiments show that the fast pathway alone is insufficient for reliable return gains but materially improves slow actor learning when kept online (Section~\ref{sec:exp-bc})---a division of labor rather than a replacement for gradient TTA.
+
+%----------------------------------------------------------------------
+\subsection{Fast memory, context, and dual-process learning}
+\label{sec:related-dual}
+
+Several architectures separate transient context from persistent parameters.
+Hypernetworks and fast weights modulate effective connectivity as a function of input or episode history~\cite{ha2017hypernetworks,ba2016using,mallya2018piggyback}.
+Key--value episodic memory retrieves past transitions for one-shot or few-shot control~\cite{blundell2016model,pritzel2017neural}.
+In sequence models, in-context learning can implement implicit adaptation without explicit gradient steps at test time~\cite{brown2020language}.
+
+Cognitive science proposes \emph{complementary learning systems}: a fast hippocampal store for rapid encoding and a slow neocortical store for gradual integration~\cite{mcclelland1995complementary,kumaran2016learning}.
+Recent machine-learning work revisits this split for continual and few-shot learning~\cite{ritter2018been,hung2019optimizing}.
+
+MWM instantiates a CLS-like split \emph{inside} a world model:
+$P_t$ is the fast, capacity-limited trace written by local error;
+actor and $\theta_{\mathrm{wm}}$ are slow stores updated from replay;
+coupled flush (Section~\ref{sec:consolidation}) is an engineered analogue of transferring hippocampal traces into cortical weights.
+Unlike generic fast-weight layers, $P_t$ is tied explicitly to \textbf{RSSM prior prediction error} and norm-bounded Hebbian writes, making the fast store interpretable as a dynamics compensator rather than arbitrary context.
+
+%----------------------------------------------------------------------
+\subsection{Hebbian, local, and non-gradient plasticity}
+\label{sec:related-hebbian}
+
+Hebbian and covariance-based rules update synaptic efficacy from pre- and post-synaptic activity without global loss minimization~\cite{hebb1949organization,bienenstock1982theory}.
+Modern work reintroduces local plasticity for continual learning, associative recall, and fast modulation in recurrent networks~\cite{ba2016using,mallya2018piggyback}.
+
+Outer-product updates of the form $\Delta W \propto e \otimes x$ appear in linearized adaptation, fast-weight RNNs, and low-rank fine-tuning~\cite{hu2022lora}.
+MWM's write rule (Eq.~\eqref{eq:plastic-write}) is in this family: signed error $e_t$ on prior logits and input $x_t$ from latent state and action jointly determine a rank-one increment to $P_t$, with decay and Frobenius projection ensuring stability.
+
+Distinctions from low-rank adaptation (LoRA)~\cite{hu2022lora} and adapters~\cite{houlsby2019parameter}:
+those methods introduce \emph{trainable} parameters at pretraining or fine-tuning time and update them by backprop;
+$P_t$ has \textbf{no pretrained weights}, is \textbf{zeroed at episode boundaries} (optional), and is updated \textbf{only at test time} by a fixed Hebbian rule.
+MWM operates in latent logit space of a categorical RSSM with explicit surprise gating and consolidation flush, targeting model-based RL under gain shift rather than supervised TTA or parameter-efficient fine-tuning alone.
+
+%----------------------------------------------------------------------
+\subsection{Adapting world models after deployment}
+\label{sec:related-wm-adapt}
+
+Prior work adapts dynamics models online for MPC~\cite{nagabandi2018learning,chua2018deep}, fine-tunes latent models under domain shift~\cite{hansen2022temporal}, or retrains decoders for sim-to-real~\cite{openai2018learning}.
+Dreamer-style agents can in principle continue WM training from replay; in practice, unconstrained joint updates of dynamics and policy are unstable under non-stationarity, and imagination quality may degrade before control improves.
+
+MWM constrains \emph{where} and \emph{how fast} each component may change:
+fast prior correction ($P_t$), slow actor-only gradients with frozen-WM imagination (Section~\ref{sec:exp-actor-sweep}), and optional slow $\theta_{\mathrm{wm}}$ with sync to frozen inference copies.
+Our WM-imagination ablation shows that plasticized multi-step rollouts during actor updates can \emph{hurt} performance even when online $P_t$ helps---supporting a split between \textbf{one-step belief correction} and \textbf{multi-step planning dynamics}.
+
+%----------------------------------------------------------------------
+\subsection{Positioning summary}
+\label{sec:related-summary}
+
+Table~\ref{tab:related-positioning} contrasts MWM with nearby paradigms.
+
+\begin{table}[t]
+  \centering
+  \caption{Positioning of MWM relative to adjacent approaches.}
+  \label{tab:related-positioning}
+  \small
+  \begin{tabular}{@{}lccc@{}}
+    \toprule
+    Approach & Fast store & Slow update & Targets WM prior \\
+    \midrule
+    Meta-RL / MAML~\cite{finn2017model} & -- & grad, all weights & optional \\
+    Online fine-tuning~\cite{nagabandi2018learning,zintgraf2021fast} & -- & grad, batched & sometimes \\
+    RL$^2$ / episodic memory~\cite{duan2016rl,pritzel2017neural} & hidden / KV & grad at meta-train & indirect \\
+    LoRA / adapters~\cite{hu2022lora,houlsby2019parameter} & -- & grad, pretrained & any layer \\
+    \textbf{MWM (ours)} & \textbf{$P_t$ Hebbian} & \textbf{actor / $\theta_{\mathrm{wm}}$} & \textbf{prior logits} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+In short, MWM is not primarily a new world-model architecture or a meta-learning algorithm.
+It is a \textbf{test-time protocol} for frozen pretrained agents: augment RSSM priors with a norm-bounded Hebbian residual, pair it with slow replay-based actor learning, and optionally consolidate into $\theta_{\mathrm{wm}}$ while flushing $P_t$.
+To our knowledge, this specific tri-timescale split---fast prior plasticity, frozen-imagination actor adapt, and coupled consolidation flush---has not been systematically evaluated in Dreamer-class agents under controlled actuator gain shift.

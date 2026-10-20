@@ -1,0 +1,34 @@
+% MWM paper skeleton
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{graphicx}
+
+\title{Malleable World Models:\\
+  Fast Hebbian Plasticity and Slow Consolidation for Test-Time Adaptation}
+\author{Anonymous}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Pretrained world-model agents degrade under distribution shift because frozen dynamics no longer match the environment.
+We propose \emph{Malleable World Models} (MWM): a test-time stack combining (i)~a backpropagation-free plastic prior residual $P_t$ updated every step from prediction error, (ii)~slow actor fine-tuning from post-shift replay, and (iii)~optional slow world-model consolidation with coupled flushing of $P_t$.
+On proprioceptive \texttt{walker-walk} under actuator gain shift, fast plasticity detects change and scaffolds actor adaptation ($7/10$ seeds), while plasticity alone does not reliably improve return; consolidation drains $P_t$ in pilot runs but has not yet yielded control gains at scale.
+\end{abstract}
+
+\input{introduction}
+\input{related_work}
+\input{method}
+\input{experiments}
+\input{discussion}
+
+\bibliographystyle{plain}
+\bibliography{references}
+
+\end{document}

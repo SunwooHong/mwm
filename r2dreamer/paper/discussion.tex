@@ -1,0 +1,116 @@
+% Discussion and Conclusion for Malleable World Models (MWM)
+% \input{discussion}
+
+\section{Discussion}
+\label{sec:discussion}
+
+Section~\ref{sec:experiments} yields a coherent but \emph{asymmetric} picture: fast plasticity is effective as a \textbf{world-model compensator} and as a \textbf{scaffold for slow policy learning}, yet it is not, by itself, a reliable recipe for higher return.
+We discuss why this asymmetry is expected rather than paradoxical, what it implies for dual-timescale test-time agents, and which design choices proved load-bearing.
+
+%----------------------------------------------------------------------
+\subsection{Fast plasticity as WM correction, not motor control}
+\label{sec:disc-fast}
+
+MWM's fast pathway modifies prior logits, not policy weights (Section~\ref{sec:inference}).
+When gain drops, the pretrained transition model mis-predicts the consequences of the same action commands; $P_t$ absorbs a low-rank correction so that one-step priors track posteriors more closely.
+That shift is \emph{detected} (Q1) and often \emph{partially corrected} in prior MSE (Q2), which aligns with the intended role of a bounded side memory.
+
+The absence of a robust control benefit from plastic alone (Q3) is nonetheless informative.
+The frozen actor $\pi_\theta$ was trained under $\gamma=1$; changing latent dynamics without updating $\pi$ does not guarantee improved torque selection---especially when $\|P_t\|$ saturates at $\mu$ and prior corrections remain local in logit space.
+In several seeds, plastic even underperforms frozen on return despite better or mixed WM metrics, suggesting that \emph{misaligned latent beliefs can hurt a fixed policy} when corrections are large but imprecise.
+Thus the biological ``System~1 reflex'' analogy applies to \textbf{belief updating}, not to direct action optimization: the reflex is ``reconcile what I expected with what I saw,'' not ``immediately act optimally under new gains.''
+
+%----------------------------------------------------------------------
+\subsection{Why online $P_t$ helps slow actor learning}
+\label{sec:disc-scaffold}
+
+The strongest control evidence comes from comparing actor adaptation with vs.\ without online plastic (Q4).
+We interpret this as \textbf{distributional scaffolding}: during $\mathcal{B}$, replay contains transitions collected under shifting gains; if $P_t$ is active at collection time, encoded latents and implied one-step dynamics reflect post-shift statistics more faithfully than frozen-prior inference alone.
+Actor gradients---computed on imagined rollouts with frozen dynamics heads but \emph{real} replay starts---benefit from a replay manifold that is less stale.
+
+Two nuances temper a stronger claim.
+First, online plastic does not uniformly lower prior MSE in the B-vs-C comparison; return can improve even when WM error metrics are mixed, so the scaffold story may involve \emph{task-relevant} features of the latent trajectory rather than global KL optimality.
+Second, using $P_t$ \emph{inside} imagination during actor updates harms performance in our pilot (Section~\ref{sec:exp-actor-sweep}): plasticized rollouts appear too volatile or biased for stable policy gradients.
+The winning configuration is deliberately \textbf{asymmetric}: plastic online and in replay encoding; frozen transitions during multi-step imagination.
+
+This asymmetry is a practical design lesson for model-based TTA: \emph{fast stores should shape the data and one-step beliefs on which slow learners train; they need not---and sometimes should not---define the full imagined horizon.}
+
+%----------------------------------------------------------------------
+\subsection{Slow actor adaptation as the primary control pathway}
+\label{sec:disc-actor}
+
+cfg0 actor fine-tuning (Q5) delivers the most reliable Phase~$\mathcal{B}$ returns in our sweep, with mean improvement over plastic-only act and modest gains over no-adapt.
+The schedule $(\Delta_{\mathrm{adapt}}{=}50, E{=}4)$ balances update frequency against buffer maturity: too few updates (cfg1) underfit the shift; overly frequent micro-updates (cfg3 pilot) inject gradient noise; overly sparse diversity schedules (cfg2 pilot) delay learning.
+
+Remaining variance across seeds (${\approx}0.14$ std on cfg0) likely reflects sensitivity of on-policy-ish replay under non-stationarity: gain shift changes both transition and reward scaling, while reward and value heads stay frozen.
+Future work may co-adapt heads or use smaller actor LR with longer $\mathcal{B}$ horizons.
+
+%----------------------------------------------------------------------
+\subsection{Consolidation: mechanism without control transfer (yet)}
+\label{sec:disc-consolidation}
+
+The consolidation pilot (Q6) separates \emph{whether $P_t$ can be retired} from \emph{whether retirement helps control}.
+Coupled flush in Condition~C drains $\|P_t\|_F$ in all three seeds while A/B/D remain saturated---the intended fast-to-slow \textbf{mechanical transfer} of the scaffold.
+Yet C does not outperform A on return, and slow dynamics loss does not decrease monotonically.
+
+We see three interacting explanations.
+\textbf{(i) Premature flush.} Boost $b_t$ can rise when a single slow update appears to improve dyn loss, even if $\theta_{\mathrm{wm}}$ has not stably absorbed shift statistics; $P_t$ may be washed out before $\theta$ is ready, creating a transient ``belief gap.''
+\textbf{(ii) Weak slow learning.} $\alpha_{\mathrm{wm}}{=}0.02$ with $\Delta_{\mathrm{slow}}{=}100$ yields only ${\sim}10$ WM updates per $\mathcal{B}$; this may be insufficient for durable $\theta$ change on a ${\sim}9.7$M-parameter backbone.
+\textbf{(iii) Head mismatch.} Slow updates change encoder--RSSM--decoder but leave reward/value frozen; the actor adapts to latents whose long-horizon reward implications are still modeled by pre-shift heads.
+
+Condition~B (slow $\theta$ without flush) achieving the highest pilot return is consistent with (i): retaining $P_t$ while nudging $\theta$ may be safer than aggressive drainage.
+The trap condition~D does not fully validate ``oscillation without $\theta$'' on trace norm---flush without slow learning did not drain $P_t$---so error-only decay is not a strong negative control for scaffold removal.
+
+%----------------------------------------------------------------------
+\subsection{Relation to complementary learning systems}
+\label{sec:disc-cls}
+
+Our results instantiate a computational variant of complementary learning systems~\cite{mcclelland1995complementary}:
+$P_t$ is a fast, capacity-limited store with rapid write and explicit decay;
+actor and WM parameters are slow stores with interleaved replay and gradient-based consolidation.
+The hippocampal--neocortical narrative---rapid encoding followed by gradual integration---maps qualitatively onto $P_t$ drainage coupled to $\theta_{\mathrm{wm}}$ updates.
+
+Important differences remain.
+MWM's fast store is \emph{engineered} (Hebbian on logits, norm cap, flush schedule), not biologically faithful.
+We do not demonstrate lasting retention after $P_t$ is flushed: $\mathcal{A}_2$ recovery may reflect gain restoration more than consolidated $\theta$.
+A full CLS-style account would require showing that post-flush performance \emph{without} $P_t$ matches or exceeds pre-flush performance with $P_t$---not yet established at $n{=}3$ pilot scale.
+
+%----------------------------------------------------------------------
+\subsection{Limitations and future directions}
+\label{sec:disc-future}
+
+\paragraph{Scope.}
+One task, one shift family (actuator gain), proprioceptive inputs.
+Generalization to visual observations, contact/friction changes, and multi-stage shifts is open.
+
+\paragraph{Detection vs.\ gating.}
+Main runs use \texttt{always\_on} plasticity; surprise-only gating improves prior MSE in some sweeps but is not co-optimized with actor adapt.
+A principled detector--responder evaluation (latency, false positives) is future work.
+
+\paragraph{Latency claims.}
+Plastic-only does not consistently shorten reward recovery time to $90\%$ baseline; any ``immediate response'' claim should reference WM traces and prior error, not return alone.
+A dedicated ablation measuring the first $\Delta_{\mathrm{adapt}}$ actor-free steps would sharpen the System~1 narrative.
+
+\paragraph{Consolidation hyperparameters.}
+Increasing $\alpha_{\mathrm{wm}}$, decreasing $\Delta_{\mathrm{slow}}$, ramping $b_t$ only after sustained dyn-loss improvement, and co-adapting reward heads are natural next steps before a $10$-seed consolidation study.
+
+\paragraph{Theory.}
+$P_t$ is a rank-one Hebbian accumulator with projection; analyzing its capacity and interaction with categorical RSSM priors could clarify when ${\sim}6\%$ extra state suffices.
+
+%----------------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced \textbf{Malleable World Models (MWM)}, a test-time adaptation framework for frozen pretrained world-model agents that combines three timescales: a backpropagation-free plastic prior residual $P_t$ updated every step from prediction error; periodic actor fine-tuning from post-shift replay; and optional slow fine-tuning of world-model weights with coupled flushing of $P_t$.
+
+On proprioceptive \texttt{walker-walk} under actuator gain shift, we find:
+\begin{enumerate}[leftmargin=*, itemsep=2pt]
+  \item \textbf{Shift is detected} in world-model error and fast-trace growth; $P_t$ saturates within tens of steps.
+  \item \textbf{Fast plasticity alone} does not reliably improve return; it partially improves prior alignment and attenuates average reward drop during shift.
+  \item \textbf{Online $P_t$ scaffolds slow actor adaptation} ($7/10$ seeds, mean $+0.068$), especially with frozen-WM imagination.
+  \item \textbf{The best control stack} in our sweep is online plastic + cfg0 actor updates (mean Phase~$\mathcal{B}$ return $1.46$).
+  \item \textbf{Consolidation} can drain $P_t$ when slow $\theta$ and coupled flush are active, but pilot evidence does not yet show reward gains from this transfer.
+\end{enumerate}
+
+MWM is best viewed not as a replacement for gradient-based TTA, but as a \textbf{structured decomposition}: use fast Hebbian plasticity to keep latent beliefs locally honest under surprise; use slow backpropagation to revise behavior; and, when shifts persist, consolidate into $\theta$ while retiring the scaffold.
+Making that decomposition \emph{pay off end-to-end}---stable slow learning, timed flush, and lasting competence after $P_t$ is cleared---remains the central open challenge and the focus of ongoing experimentation.
